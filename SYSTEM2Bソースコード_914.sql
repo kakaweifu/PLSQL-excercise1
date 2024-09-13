@@ -1,4 +1,4 @@
--- SQL
+-- This file is written in SQL
 CREATE OR REPLACE PACKAGE SYSTEM_B_IMPORT_EXPORT AS
  
     -- インポート処理を行う手続き
