@@ -1,0 +1,481 @@
+-- パッケージ定義
+CREATE OR REPLACE PACKAGE SYSTEM_A_IMPORT_EXPORT AS
+  -- パッケージの定義を行います。このパッケージは、システムAのインポートとエクスポートの機能を提供します。
+
+  -- エクスポート処理
+  PROCEDURE EXPORT(
+    I_DATE_FROM IN DATE, -- 開始日を引数として受け取り、エクスポート範囲の開始日を指定します。
+    I_DATE_TO IN DATE,   -- 終了日を引数として受け取り、エクスポート範囲の終了日を指定します。
+    I_DIR_NAME IN VARCHAR2 -- エクスポート先のディレクトリ名を指定します。
+  );
+
+  -- インポート処理
+  PROCEDURE IMPORT(
+    I_DIR_NAME IN VARCHAR2, -- インポートするディレクトリ名を引数として受け取ります。
+    I_EMPLOYEES_FILE IN VARCHAR2, -- インポートする社員データのCSVファイル名を指定します。
+    I_ATTENDANCES_FILE IN VARCHAR2 -- インポートする勤怠データのCSVファイル名を指定します。
+  );
+END SYSTEM_A_IMPORT_EXPORT;
+-- パッケージ定義が終了します。
+
+/
+
+-- パッケージ本体定義
+CREATE OR REPLACE PACKAGE BODY SYSTEM_A_IMPORT_EXPORT AS
+  -- パッケージの本体部分を定義します。ここで実際の処理ロジックが記述されます。
+
+  -- 定数定義: 社員CSVファイルのヘッダー
+  GC_EMPLOYEES_CSV_HEADER   CONSTANT VARCHAR2(64) := '社員ID_A,社員ID_B,姓,名,有効フラグ';
+  -- 社員データをエクスポートする際に使用するCSVファイルのヘッダー定義です。
+
+  -- 定数定義: 勤怠データCSVファイルのヘッダー
+  GC_ATTENDANCES_CSV_HEADER CONSTANT VARCHAR2(512) := '社員ID_A,社員ID_B,日付,勤務種別コード,...';
+  -- 勤怠データをエクスポートする際に使用するCSVファイルのヘッダー定義です。
+
+  -- デバッグフラグ: TRUEの時、デバッグメッセージが出力される
+  GC_DEBUG CONSTANT BOOLEAN := TRUE;
+  -- デバッグメッセージの出力を制御するためのフラグです。TRUEの場合、デバッグメッセージが表示されます。
+
+  -- 動的ディレクトリ名を保持する変数
+  G_DIR_OBJECT CHAR(16);
+  -- 動的に作成されるディレクトリ名を保持するための変数です。
+
+  -- ファイルハンドルを保持する変数
+  G_FILE_HANDLE UTL_FILE.FILE_TYPE;
+  -- ファイル操作のためのハンドルを保持します。ファイルを開いたり閉じたりする際に使用します。
+
+  -- 社員データを選択するカーソル
+  CURSOR G_EMPLOYEES_CUR IS
+  SELECT
+    EMPLOYEE_ID || ',' || '' || ',' || REPLACE(FAMILY_NAME, ',', CHR(9)) || ',' || ... AS CSV
+  FROM EMPLOYEES;
+  -- 社員データをCSV形式で取得するためのカーソルです。社員データをエクスポートする際に使用します。
+
+  -- 勤怠データを選択するカーソル (指定期間内)
+  CURSOR G_ATTENDANCES_CUR(
+    I_DATE_FROM IN DATE, -- 開始日を指定
+    I_DATE_TO IN DATE    -- 終了日を指定
+  ) IS
+  SELECT
+    EMPLOYEE_ID || ',' || '' || ',' || TO_CHAR(ATTENDANCE_DATE, 'YYYY/MM/DD') || ',' || ... AS CSV
+  FROM ATTENDANCES
+  WHERE ATTENDANCE_DATE BETWEEN I_DATE_FROM AND I_DATE_TO;
+  -- 勤怠データを指定された期間内で選択し、CSV形式で取得します。勤怠データのエクスポート時に使用します。
+
+  -- デバッグメッセージを出力するプロシージャ
+  PROCEDURE DEBUG_PRINT(
+    I_MSG IN VARCHAR2 -- メッセージ内容
+  ) IS
+  BEGIN
+    IF GC_DEBUG THEN
+      -- デバッグモードが有効な場合に、メッセージを出力します。
+      DBMS_OUTPUT.PUT_LINE('デバッグ: ' || I_MSG);
+    END IF;
+  END DEBUG_PRINT;
+  -- デバッグメッセージを出力するためのプロシージャです。デバッグ情報を追跡するために使用します。
+
+  -- 動的ディレクトリを作成するプロシージャ
+  PROCEDURE CREATE_DIRECTORY(
+    I_DIR_NAME IN VARCHAR2 -- 作成するディレクトリ名を指定
+  ) IS
+  BEGIN
+    LOOP
+      BEGIN
+        -- ランダムなディレクトリ名を生成
+        G_DIR_OBJECT := DBMS_RANDOM.STRING('U', 16);
+
+        -- 指定されたディレクトリを作成
+        EXECUTE IMMEDIATE 'CREATE DIRECTORY ' || G_DIR_OBJECT || ' AS ''' || I_DIR_NAME || '''';
+
+        -- ディレクトリが正常に作成されたことをデバッグメッセージで報告
+        DEBUG_PRINT('ディレクトリ作成: ' || G_DIR_OBJECT || ' (' || I_DIR_NAME || ')');
+        EXIT;
+      EXCEPTION
+        WHEN OTHERS THEN
+          IF SQLCODE = -955 THEN
+            -- すでにディレクトリが存在する場合は次に進む
+            CONTINUE;
+          ELSE
+            -- その他のエラーが発生した場合は再度エラーを発生させる
+            RAISE;
+          END IF;
+      END;
+    END LOOP;
+  END CREATE_DIRECTORY;
+  -- ディレクトリを作成するプロシージャです。ランダムなディレクトリ名を生成し、指定された場所にディレクトリを作成します。
+  -- 既存のディレクトリがある場合は処理を続行し、その他のエラーが発生した場合はエラーを発生させます。
+
+  -- 動的ディレクトリを削除するプロシージャ
+  PROCEDURE DROP_DIRECTORY IS
+  BEGIN
+    -- 作成したディレクトリを削除します。
+    EXECUTE IMMEDIATE 'DROP DIRECTORY ' || G_DIR_OBJECT;
+
+    -- ディレクトリが削除されたことをデバッグメッセージで報告
+    DEBUG_PRINT('ディレクトリ削除: ' || G_DIR_OBJECT);
+  END DROP_DIRECTORY;
+  -- 作成したディレクトリを削除するプロシージャです。エクスポートやインポート処理の後に不要になったディレクトリを削除します。
+
+  -- ファイル名を生成する関数
+  FUNCTION CREATE_FILE_NAME(
+    I_PREFIX IN VARCHAR2 -- ファイル名の接頭辞
+  ) RETURN VARCHAR2 IS
+  BEGIN
+    -- プレフィックスと現在の日付時刻を用いて一意なファイル名を生成します。
+    RETURN I_PREFIX || TO_CHAR(SYSDATE, 'YYYYMMDDHH24MI') || '.csv';
+  END CREATE_FILE_NAME;
+  -- 一意なファイル名を生成するための関数です。エクスポートされるファイル名はプレフィックスと日時情報を基に生成されます。
+
+  -- ファイルを開くプロシージャ
+  PROCEDURE OPEN_FILE(
+    I_FILE_NAME IN VARCHAR2, -- ファイル名
+    I_OPEN_MODE IN VARCHAR2  -- ファイルを開くモード ('r' 読み込み, 'w' 書き込み)
+  ) IS
+  BEGIN
+    -- 指定されたモードでファイルを開きます。
+    G_FILE_HANDLE := UTL_FILE.FOPEN_NCHAR(G_DIR_OBJECT, I_FILE_NAME, I_OPEN_MODE);
+
+    -- ファイルが正常に開かれたことをデバッグメッセージで報告
+    DEBUG_PRINT('ファイルオープン: ' || I_FILE_NAME);
+  END OPEN_FILE;
+  -- ファイルを指定されたモードで開くプロシージャです。ファイルが正常に開かれた場合、その情報をデバッグメッセージで報告します。
+
+  -- ファイルを閉じるプロシージャ
+  PROCEDURE CLOSE_FILE IS
+  BEGIN
+    -- ファイルがオープンしている場合のみ閉じる
+    IF UTL_FILE.IS_OPEN(G_FILE_HANDLE) THEN
+      UTL_FILE.FCLOSE(G_FILE_HANDLE);
+    END IF;
+  END CLOSE_FILE;
+  -- 開いているファイルを閉じるプロシージャです。ファイルが開かれていない場合は何もしません。
+
+  -- ファイルに1行を書き込むプロシージャ
+  PROCEDURE PRINT_LINE(
+    I_BUF IN VARCHAR2 -- 書き込むデータ
+  ) IS
+  BEGIN
+    -- デバッグモードの場合、書き込む内容をデバッグメッセージとして表示
+    DEBUG_PRINT(I_BUF);
+
+    -- ファイルに1行分のデータを書き込む
+    UTL_FILE.PUT_LINE_NCHAR(G_FILE_HANDLE, I_BUF);
+  END PRINT_LINE;
+  -- ファイルに1行データを書き込むプロシージャです。デバッグモードが有効な場合は、書き込む内容をデバッグメッセージとして表示します。
+
+  -- ファイルから1行を読み取る関数
+  FUNCTION GET_LINE RETURN VARCHAR2 IS
+    L_BUF NVARCHAR2(4098); -- 読み込むバッファ
+  BEGIN
+    -- ファイルから1行分のデータを取得
+    UTL_FILE.GET_LINE_NCHAR(G_FILE_HANDLE, L_BUF);
+
+    -- 取得したデータの改行コードを削除
+    L_BUF := RTRIM(L_BUF, CHR(13) || CHR(10));
+
+    -- デバッグモードの場合、読み取った内容をデバッグメッセージとして表示
+    DEBUG_PRINT(L_BUF);
+
+    -- 読み取ったデータを返す
+    RETURN TO_CHAR(L_BUF);
+  END GET_LINE;
+  -- ファイルから1行分のデータを読み取り、改行コードを削除してから返す関数です。デバッグメッセージとして内容も表示します。
+
+  -- CSVからデータを取得する関数
+  FUNCTION GET_CSV_ITEM(
+    I_CSV IN VARCHAR2,         -- CSVデータ
+    IO_START_POS IN OUT PLS_INTEGER -- 開始位置を保持する変数
+  ) RETURN VARCHAR2 IS
+    L_END_POS PLS_INTEGER;  -- 項目の終了位置
+    L_ITEM    VARCHAR2(1024); -- 取得する項目
+  BEGIN
+    -- CSVから次の項目を取得
+    L_END_POS := INSTR(I_CSV, ',', IO_START_POS);
+    IF L_END_POS > 0 THEN
+      -- カンマ区切りで次の項目を抽出
+      L_ITEM := SUBSTR(I_CSV, IO_START_POS, L_END_POS - IO_START_POS);
+      IO_START_POS := L_END_POS + 1;
+    ELSE
+      -- 最後の項目を取得
+      L_ITEM := SUBSTR(I_CSV, IO_START_POS);
+      IO_START_POS := 0;
+    END IF;
+
+    -- 取得した項目を返す
+    RETURN L_ITEM;
+  END GET_CSV_ITEM;
+  -- CSVデータから次の項目をカンマ区切りで取得する関数です。位置を保持して次の項目を順に取得していきます。
+
+  -- CSVから社員データを行形式で読み取る関数
+  FUNCTION TO_EMPLOYEE(
+    I_CSV IN VARCHAR2 -- CSVデータ
+  ) RETURN EMPLOYEES%ROWTYPE IS
+    L_EMPLOYEE  EMPLOYEES%ROWTYPE; -- 社員データの行型
+    L_START_POS PLS_INTEGER := 1; -- 開始位置
+    L_DUMMY     VARCHAR(8); -- ダミーデータ用の変数
+  BEGIN
+    -- CSVの各フィールドを対応する社員データに変換
+    L_EMPLOYEE.EMPLOYEE_ID := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_DUMMY := GET_CSV_ITEM(I_CSV, L_START_POS); -- ダミーデータは無視
+    L_EMPLOYEE.FAMILY_NAME := REPLACE(GET_CSV_ITEM(I_CSV, L_START_POS), CHR(9), ',');
+    L_EMPLOYEE.GIVEN_NAME := REPLACE(GET_CSV_ITEM(I_CSV, L_START_POS), CHR(9), ',');
+    L_EMPLOYEE.IS_VALID := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    RETURN L_EMPLOYEE;
+  END TO_EMPLOYEE;
+  -- CSVデータから社員情報を読み取ってデータベースの行形式に変換する関数です。CSVデータを各フィールドに分割し、対応する社員データにマッピングします。
+
+  -- 社員データをマージ（更新または挿入）するプロシージャ
+  PROCEDURE MERGE_EMPLOYEE(
+    I_E IN EMPLOYEES%ROWTYPE -- マージ対象の社員データ
+  ) IS
+  BEGIN
+    -- 社員データが存在すれば更新、存在しなければ挿入
+    UPDATE EMPLOYEES
+    SET
+      FAMILY_NAME = I_E.FAMILY_NAME,
+      GIVEN_NAME = I_E.GIVEN_NAME,
+      IS_VALID = I_E.IS_VALID,
+      LAST_UPDATE_DATE = SYSDATE
+    WHERE
+      EMPLOYEE_ID = I_E.EMPLOYEE_ID;
+    IF SQL%ROWCOUNT = 0 THEN
+      -- データが存在しない場合は新規挿入
+      INSERT INTO EMPLOYEES(
+        EMPLOYEE_ID,
+        FAMILY_NAME,
+        GIVEN_NAME,
+        IS_VALID
+      ) VALUES(
+        I_E.EMPLOYEE_ID,
+        I_E.FAMILY_NAME,
+        I_E.GIVEN_NAME,
+        I_E.IS_VALID
+      );
+    END IF;
+  END MERGE_EMPLOYEE;
+  -- 社員データをマージするプロシージャです。データが存在すれば更新し、存在しなければ新規に挿入します。
+
+  -- CSVから勤怠データを行形式で読み取る関数
+  FUNCTION TO_ATTENDANCE(
+    I_CSV IN VARCHAR2 -- CSVデータ
+  ) RETURN ATTENDANCES%ROWTYPE IS
+    L_ATTENDANCE ATTENDANCES%ROWTYPE; -- 勤怠データの行型
+    L_START_POS  PLS_INTEGER := 1; -- 開始位置
+    L_DUMMY      VARCHAR(8); -- ダミーデータ用の変数
+  BEGIN
+    -- CSVの各フィールドを対応する勤怠データに変換
+    L_ATTENDANCE.EMPLOYEE_ID := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_DUMMY := GET_CSV_ITEM(I_CSV, L_START_POS); -- ダミーデータは無視
+    L_ATTENDANCE.ATTENDANCE_DATE := TO_DATE(GET_CSV_ITEM(I_CSV, L_START_POS), 'YYYY/MM/DD');
+    L_ATTENDANCE.ATTENDANCE_TYPE_CODE := GET_CSV_ITEM(I_CSV, L_START_POS);
+    L_ATTENDANCE.SCHEDULED_START_TIME := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.SCHEDULED_END_TIME := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.START_TIME := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.END_TIME := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.WORKING_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.BREAKING_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.ABSENCE_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.OVER_TIME_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.MIDNIGHT_WORKING_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    L_ATTENDANCE.OVER_60_OVER_TIME_MINUTES := TO_NUMBER(GET_CSV_ITEM(I_CSV, L_START_POS));
+    RETURN L_ATTENDANCE;
+  END TO_ATTENDANCE;
+  -- CSVデータから勤怠情報を読み取ってデータベース用の形式に変換する関数です。各フィールドを適切なデータ型に変換し、対応する勤怠データにマッピングします。
+
+  -- 勤怠データをマージ（更新または挿入）するプロシージャ
+  PROCEDURE MERGE_ATTENDANCE(
+    I_A IN ATTENDANCES%ROWTYPE -- マージ対象の勤怠データ
+  ) IS
+  BEGIN
+    -- 勤怠データが存在すれば更新、存在しなければ挿入
+    INSERT INTO ATTENDANCES(
+      EMPLOYEE_ID,
+      ATTENDANCE_DATE,
+      ATTENDANCE_TYPE_CODE,
+      SCHEDULED_START_TIME,
+      SCHEDULED_END_TIME,
+      START_TIME,
+      END_TIME,
+      WORKING_MINUTES,
+      BREAKING_MINUTES,
+      ABSENCE_MINUTES,
+      OVER_TIME_MINUTES,
+      MIDNIGHT_WORKING_MINUTES,
+      OVER_60_OVER_TIME_MINUTES
+    ) VALUES(
+      I_A.EMPLOYEE_ID,
+      I_A.ATTENDANCE_DATE,
+      I_A.ATTENDANCE_TYPE_CODE,
+      I_A.SCHEDULED_START_TIME,
+      I_A.SCHEDULED_END_TIME,
+      I_A.START_TIME,
+      I_A.END_TIME,
+      I_A.WORKING_MINUTES,
+      I_A.BREAKING_MINUTES,
+      I_A.ABSENCE_MINUTES,
+      I_A.OVER_TIME_MINUTES,
+      I_A.MIDNIGHT_WORKING_MINUTES,
+      I_A.OVER_60_OVER_TIME_MINUTES
+    );
+  EXCEPTION
+    -- データが既に存在している場合、更新処理を行う
+    WHEN DUP_VAL_ON_INDEX THEN
+      UPDATE ATTENDANCES
+      SET ATTENDANCE_TYPE_CODE = I_A.ATTENDANCE_TYPE_CODE,
+          SCHEDULED_START_TIME = I_A.SCHEDULED_START_TIME,
+          SCHEDULED_END_TIME = I_A.SCHEDULED_END_TIME,
+          START_TIME = I_A.START_TIME,
+          END_TIME = I_A.END_TIME,
+          WORKING_MINUTES = I_A.WORKING_MINUTES,
+          BREAKING_MINUTES = I_A.BREAKING_MINUTES,
+          ABSENCE_MINUTES = I_A.ABSENCE_MINUTES,
+          OVER_TIME_MINUTES = I_A.OVER_TIME_MINUTES,
+          MIDNIGHT_WORKING_MINUTES = I_A.MIDNIGHT_WORKING_MINUTES,
+          OVER_60_OVER_TIME_MINUTES = I_A.OVER_60_OVER_TIME_MINUTES,
+          LAST_UPDATE_DATE = SYSDATE
+      WHERE EMPLOYEE_ID = I_A.EMPLOYEE_ID
+      AND ATTENDANCE_DATE = I_A.ATTENDANCE_DATE;
+  END MERGE_ATTENDANCE;
+  -- 勤怠データをマージ（更新または挿入）するプロシージャです。データが既に存在している場合は更新し、存在しない場合は新規に挿入します。
+
+  -- Public procedures (エクスポート処理とインポート処理)
+  PROCEDURE EXPORT(
+    I_DATE_FROM IN DATE, -- 開始日
+    I_DATE_TO IN DATE,   -- 終了日
+    I_DIR_NAME IN VARCHAR2 -- エクスポート先のディレクトリ名
+  ) IS
+  BEGIN
+    -- エクスポート処理を開始することをデバッグメッセージで報告
+    DEBUG_PRINT('エクスポート処理開始');
+    DEBUG_PRINT('開始日: ' || TO_CHAR(I_DATE_FROM, 'YYYY/MM/DD'));
+    DEBUG_PRINT('終了日: ' || TO_CHAR(I_DATE_TO, 'YYYY/MM/DD'));
+    DEBUG_PRINT('出力先フォルダ: ' || I_DIR_NAME);
+
+    -- ディレクトリを作成
+    CREATE_DIRECTORY(I_DIR_NAME);
+
+    -- 社員マスタのエクスポート処理を開始
+    DEBUG_PRINT('社員マスタCSVファイル出力開始');
+    OPEN_FILE(CREATE_FILE_NAME('systemA_employees_'), 'W'); -- ファイルを作成して書き込みモードで開く
+    PRINT_LINE(GC_EMPLOYEES_CSV_HEADER); -- CSVのヘッダーを書き込む
+    FOR EMPLOYEE IN G_EMPLOYEES_CUR LOOP
+      -- 社員データを1行ずつファイルに書き込む
+      PRINT_LINE(EMPLOYEE.CSV);
+    END LOOP;
+
+    -- 社員マスタのエクスポート処理を終了
+    CLOSE_FILE;
+    DEBUG_PRINT('社員マスタCSVファイル出力終了');
+
+    -- 勤怠データのエクスポート処理を開始
+    DEBUG_PRINT('勤怠データCSVファイル出力開始');
+    OPEN_FILE(CREATE_FILE_NAME('systemA_attendances_'), 'W'); -- ファイルを作成して書き込みモードで開く
+    PRINT_LINE(GC_ATTENDANCES_CSV_HEADER); -- 勤怠データのヘッダーを書き込む
+    FOR ATTENDANCE IN G_ATTENDANCES_CUR(I_DATE_FROM, I_DATE_TO) LOOP
+      -- 勤怠データを1行ずつファイルに書き込む
+      PRINT_LINE(ATTENDANCE.CSV);
+    END LOOP;
+
+    -- 勤怠データのエクスポート処理を終了
+    CLOSE_FILE;
+    DEBUG_PRINT('勤怠データCSVファイル出力終了');
+
+    -- 作成したディレクトリを削除
+    DROP_DIRECTORY;
+    DEBUG_PRINT('エクスポート処理終了');
+  EXCEPTION
+    -- 例外発生時の処理
+    WHEN OTHERS THEN
+      -- エラーメッセージを表示
+      DBMS_OUTPUT.PUT_LINE(SQLCODE);
+      DBMS_OUTPUT.PUT_LINE(SQLERRM);
+      -- ファイルを閉じてディレクトリを削除
+      CLOSE_FILE;
+      DROP_DIRECTORY;
+  END EXPORT;
+  -- エクスポート処理のプロシージャです。指定された期間内の社員データと勤怠データをCSV形式で出力し、処理の最後にディレクトリを削除します。
+
+  PROCEDURE IMPORT(
+    I_DIR_NAME IN VARCHAR2,       -- インポートするディレクトリ名
+    I_EMPLOYEES_FILE IN VARCHAR2, -- インポートする社員データのCSVファイル名
+    I_ATTENDANCES_FILE IN VARCHAR2 -- インポートする勤怠データのCSVファイル名
+  ) IS
+  BEGIN
+    -- インポート処理を開始することをデバッグメッセージで報告
+    DEBUG_PRINT('インポート処理開始');
+    DEBUG_PRINT('入力元フォルダ: ' || I_DIR_NAME);
+    DEBUG_PRINT('社員マスタファイル: ' || I_EMPLOYEES_FILE);
+    DEBUG_PRINT('勤怠データファイル: ' || I_ATTENDANCES_FILE);
+
+    -- ディレクトリを作成
+    CREATE_DIRECTORY(I_DIR_NAME);
+
+    -- 社員データのインポート処理を開始
+    DEBUG_PRINT('社員マスタCSVファイル読み込み開始');
+    OPEN_FILE(I_EMPLOYEES_FILE, 'r'); -- ファイルを読み込みモードで開く
+    IF GET_LINE = GC_EMPLOYEES_CSV_HEADER THEN
+      -- ヘッダーが一致する場合のみ処理を開始
+      LOOP
+        BEGIN
+          -- CSVから読み取ったデータをマージ処理
+          MERGE_EMPLOYEE(TO_EMPLOYEE(GET_LINE));
+        EXCEPTION
+          WHEN NO_DATA_FOUND THEN
+            -- データが無くなった場合はループを終了
+            EXIT;
+        END;
+      END LOOP;
+    ELSE
+      -- ヘッダーが一致しない場合はエラーメッセージを出力
+      DBMS_OUTPUT.PUT_LINE('"' || I_EMPLOYEES_FILE || '"は社員マスタのCSVファイルではありません。');
+    END IF;
+
+    -- 社員データのインポート処理を終了
+    CLOSE_FILE;
+    DEBUG_PRINT('社員マスタCSVファイル読み込み終了');
+
+    -- 勤怠データのインポート処理を開始
+    DEBUG_PRINT('勤怠データCSVファイル読み込み開始');
+    OPEN_FILE(I_ATTENDANCES_FILE, 'r'); -- 勤怠データのCSVファイルを読み込みモードで開く
+    IF GET_LINE = GC_ATTENDANCES_CSV_HEADER THEN
+      -- ヘッダーが一致する場合のみ処理を開始
+      LOOP
+        BEGIN
+          -- CSVから読み取った勤怠データをマージ処理
+          MERGE_ATTENDANCE(TO_ATTENDANCE(GET_LINE));
+        EXCEPTION
+          WHEN NO_DATA_FOUND THEN
+            -- データが無くなった場合はループを終了
+            EXIT;
+        END;
+      END LOOP;
+    ELSE
+      -- ヘッダーが一致しない場合はエラーメッセージを出力
+      DBMS_OUTPUT.PUT_LINE('"' || I_ATTENDANCES_FILE || '"は勤怠データのCSVファイルではありません。');
+    END IF;
+
+    -- 勤怠データのインポート処理を終了
+    CLOSE_FILE;
+    DEBUG_PRINT('勤怠データCSVファイル読み込み終了');
+    COMMIT;
+
+    -- 作成したディレクトリを削除
+    DROP_DIRECTORY;
+    DEBUG_PRINT('インポート処理終了');
+  EXCEPTION
+    -- 例外発生時の処理
+    WHEN OTHERS THEN
+      -- エラーメッセージを表示
+      DBMS_OUTPUT.PUT_LINE(SQLCODE);
+      DBMS_OUTPUT.PUT_LINE(SQLERRM);
+      -- インポート処理をロールバック
+      ROLLBACK;
+      -- ファイルを閉じてディレクトリを削除
+      CLOSE_FILE;
+      DROP_DIRECTORY;
+  END IMPORT;
+  -- インポート処理のプロシージャです。指定されたCSVファイルから社員データと勤怠データを読み取り、データベースにマージします。処理の最後にディレクトリを削除します。
+
+END SYSTEM_A_IMPORT_EXPORT;
+-- パッケージ本体の終了
+/
